@@ -1,0 +1,79 @@
+name: Terraform AWS Deployment
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+env:
+  TF_ENVIRONMENT: production
+jobs:
+  terraform:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.3.0" # Replace with your desired Terraform version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -backend-config="bucket=${{ secrets.STATE_BUCKET_NAME }}"
+        working-directory: ./
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ./
+
+      - name: Terraform Plan
+        if: github.event_name == 'pull_request'
+        run: terraform plan -out tfplan
+        working-directory: ./
+
+      - name: Post Terraform Plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('tfplan', 'utf-8');
+            const output = `### Terraform Plan\n\`\`\`\n${plan}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+            core.setOutput('approval', true);
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' || (github.event_name == 'pull_request' && steps.Post_Terraform_Plan.outputs.approval == 'true')
+        run: terraform apply -auto-approve
+        working-directory: ./
+
+      - name: Update PR with Success Status
+        if: github.event_name == 'pull_request' && steps.Terraform_Apply.outcome == 'success'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Terraform apply completed successfully.'
+            });
